@@ -1,119 +1,98 @@
 #include <Arduino.h>
 
+//#include <M5Core2.h>
+//#include <M5GFX.h>
+//#include "HX711.h"
+#include <M5Atom.h>
 /*
-*******************************************************************************
-* Copyright (c) 2022 by M5Stack
-*                  Equipped with M5Core2 sample source code
-*                          配套  M5Core2 示例源代码
-* Visit for more information: https://docs.m5stack.com/en/app/scales_kit
-* 获取更多资料请访问: https://docs.m5stack.com/zh_CN/app/scales_kit
-*
-* describe: SCALES KIT WEIGHT UNIT EXAMPLE.
-* Date: 2022/02/23
-*******************************************************************************
-  Connect WEIGHT UNIT to port A (G32/33), calibration instructions: touch button
-A to remove the tare weight when there is no load, touch button B, switch the
-standard weight value left and right and put down the corresponding weight,
-confirm for calibration. 将WEIGHT UNIT连接至端口A（G32/33）， 校准说明:
-无负重情况下触摸按键A去处皮重，
-触摸按键B，左右触摸切换标准重量值并放下对应重量砝码，comfirm进行校准。
-  Libraries:
-  - [HX711](https://github.com/bogde/HX711)
-
+   -------------------------------------------------------------------------------------
+   HX711_ADC
+   Arduino library for HX711 24-Bit Analog-to-Digital Converter for Weight Scales
+   Olav Kallhovd sept2017
+   -------------------------------------------------------------------------------------
 */
 
-#include <M5Core2.h>
-#include <M5GFX.h>
-#include "HX711.h"
+/*
+   Settling time (number of samples) and data filtering can be adjusted in the config.h file
+   For calibration and storing the calibration value in eeprom, see example file "Calibration.ino"
 
-M5GFX display;
-M5Canvas canvas(&display);
+   The update() function checks for new data and starts the next conversion. In order to acheive maximum effective
+   sample rate, update() should be called at least as often as the HX711 sample rate; >10Hz@10SPS, >80Hz@80SPS.
+   If you have other time consuming code running (i.e. a graphical LCD), consider calling update() from an interrupt routine,
+   see example file "Read_1x_load_cell_interrupt_driven.ino".
 
-// HX711 related pin Settings.  HX711 相关引脚设置
-#define LOADCELL_DOUT_PIN 33
-#define LOADCELL_SCK_PIN  32
+   This is an example sketch on how to use this library
+*/
 
-HX711 scale;
+#include <HX711_ADC.h>
+#if defined(ESP8266)|| defined(ESP32) || defined(AVR)
+#include <EEPROM.h>
+#endif
+
+//pins:
+const int HX711_dout = 32; //mcu > HX711 dout pin
+const int HX711_sck = 26; //mcu > HX711 sck pin
+
+//HX711 constructor:
+HX711_ADC LoadCell(HX711_dout, HX711_sck);
+
+const int calVal_eepromAdress = 0;
+unsigned long t = 0;
 
 void setup() {
-    M5.begin();  // Init M5Stack.  初始化M5Stack
-    display.begin();
-    canvas.setColorDepth(1);  // mono color
-    canvas.createSprite(display.width(), display.height());
-    canvas.setTextDatum(MC_DATUM);
-    canvas.setPaletteColor(1, GREEN);
+  Serial.begin(115200); delay(10);
+  Serial.println();
+  Serial.println("Starting...");
 
-    canvas.drawString("Calibration sensor....", 160, 80);
-    canvas.pushSprite(0, 0);
-    scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+  LoadCell.begin();
+  LoadCell.setReverseOutput(); //uncomment to turn a negative output value to positive
+  float calibrationValue; // calibration value (see example file "Calibration.ino")
+  calibrationValue = 696.0; // uncomment this if you want to set the calibration value in the sketch
+#if defined(ESP8266)|| defined(ESP32)
+  //EEPROM.begin(512); // uncomment this if you use ESP8266/ESP32 and want to fetch the calibration value from eeprom
+#endif
+  //EEPROM.get(calVal_eepromAdress, calibrationValue); // uncomment this if you want to fetch the calibration value from eeprom
 
-    scale.set_gain();
-    // The scale value is the adc value corresponding to 1g
-    scale.set_scale(27.61f);  // set scale
-    scale.tare();             // auto set offset
+  unsigned long stabilizingtime = 2000; // preciscion right after power-up can be improved by adding a few seconds of stabilizing time
+  boolean _tare = true; //set this to false if you don't want tare to be performed in the next step
+  LoadCell.start(stabilizingtime, _tare);
+  if (LoadCell.getTareTimeoutFlag()) {
+    Serial.println("Timeout, check MCU>HX711 wiring and pin designations");
+    while (1);
+  }
+  else {
+    LoadCell.setCalFactor(calibrationValue); // set calibration value (float)
+    Serial.println("Startup is complete");
+  }
 }
 
-char info[100];
-
 void loop() {
-    canvas.fillSprite(BLACK);
-    canvas.setTextSize(1);
-    canvas.drawString("Connect the Weight Unit to PortB(G26,G36)", 160, 40);
-    canvas.drawString("Click Btn A for Tare deduction", 160, 55);
-    canvas.drawString("Click Btn B Switch to Calibration mode", 160, 70);
-    float weight = scale.get_units(10) / 1000.0;
-    // float weight = scale.get_units(10) / 1.0;
-    canvas.setTextSize(3);
-    if (weight >= 0) {
-        Serial.printf("Weight: %.2f", weight);
-        sprintf(info, "Weight: %.2f", weight);
-        canvas.drawString(String(info) + "kg", 160, 150);
-        // canvas.drawString(String(info) + "g", 160, 150);
-    } else {
-        canvas.drawString("Weight: 0kg", 160, 150);
-        // canvas.drawString("Weight: 0g", 160, 150);
+  static boolean newDataReady = 0;
+  const int serialPrintInterval = 10; //increase value to slow down serial print activity
+
+  // check for new data/start next conversion:
+  if (LoadCell.update()) newDataReady = true;
+
+  // get smoothed value from the dataset:
+  if (newDataReady) {
+    if (millis() > t + serialPrintInterval) {
+      float i = LoadCell.getData();
+      Serial.print("Load_cell output val: ");
+      Serial.println(i);
+      newDataReady = 0;
+      t = millis();
     }
-    M5.update();
-    if (M5.BtnA.wasPressed()) {
-        scale.tare();
-        canvas.drawString("0g Calibration!", 160, 180);
-    }
-    if (M5.BtnB.wasPressed()) {
-        long kg = 5;
-        while (1) {
-            M5.update();
-            canvas.fillSprite(BLACK);
-            canvas.setTextSize(1);
-            canvas.drawString("Connect the Weight Unit to PortB(G26,G36)", 160,
-                              40);
-            canvas.drawString("Click Btn A/C to change kg value", 160, 55);
-            canvas.drawString("Click Btn B Calibration Comfirm", 160, 70);
-            canvas.setTextSize(3);
-            canvas.drawString("Calibration:" + String(kg) + "kg", 160, 150);
-            canvas.drawString("comfirm", 160, 200);
-            canvas.fillTriangle(40, 200, 60, 220, 60, 180, 1);
-            canvas.fillTriangle(280, 200, 260, 220, 260, 180, 1);
-            canvas.pushSprite(0, 0);
-            if (M5.BtnA.isPressed()) {
-                kg--;
-            }
-            if (M5.BtnC.isPressed()) {
-                kg++;
-            }
-            if (M5.BtnB.wasPressed()) {
-                break;
-            }
-            delay(10);
-        }
-        long kg_adc = scale.read_average(20);
-        kg_adc      = kg_adc - scale.get_offset();
-        scale.set_scale(kg_adc / (kg * 1000.0));
-        // canvas.drawString(String(kg) + "kg Calibration: " + String(kg_adc /
-        // (kg * 1000.0)), 160, 180);
-        canvas.drawString("Set Scale: " + String(kg_adc / (kg * 1000.0)), 160,
-                          180);
-        canvas.pushSprite(0, 0);
-        delay(1000);
-    }
-    canvas.pushSprite(0, 0);
+  }
+
+  // receive command from serial terminal, send 't' to initiate tare operation:
+  if (Serial.available() > 0) {
+    char inByte = Serial.read();
+    if (inByte == 't') LoadCell.tareNoDelay();
+  }
+
+  // check if last tare operation is complete:
+  if (LoadCell.getTareStatus() == true) {
+    Serial.println("Tare complete");
+  }
+
 }
